@@ -41,6 +41,10 @@ var (
 	ErrAckTimeout  = errors.New("message was not acknowledged by receiver within the specified timeout")
 )
 
+func Bool(b bool) *bool {
+	return &b
+}
+
 func encodeMessagePacket(msg *Message) ([]byte, error) {
 	b, err := proto.Marshal(msg)
 	if err != nil {

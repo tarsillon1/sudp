@@ -5,8 +5,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 )
 
 func TestNewConn(t *testing.T) {
@@ -82,7 +80,7 @@ func TestNewConnWithAck(t *testing.T) {
 	go func() {
 		err = conn2.Pub(conn1Addr, &Message{
 			Data: []byte(expectedMsg),
-			Ack:  proto.Bool(true),
+			Ack:  Bool(true),
 		})
 		if err != nil {
 			errChan <- fmt.Errorf("failed to send message from client: %s", err)
