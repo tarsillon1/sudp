@@ -2,10 +2,7 @@ package sudp
 
 import (
 	"errors"
-	"fmt"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -16,10 +13,8 @@ const (
 )
 
 var (
-	messageHeader = []byte{messageTag}
-	ackHeader     = []byte{ackTag}
-	pingHeader    = []byte{pingTag}
-	pongHeader    = []byte{pongTag}
+	pingPacket = []byte{pingTag}
+	pongPacket = []byte{pongTag}
 )
 
 const (
@@ -41,22 +36,49 @@ var (
 	ErrAckTimeout  = errors.New("message was not acknowledged by receiver within the specified timeout")
 )
 
-func Bool(b bool) *bool {
-	return &b
+func marshalMessagePacket(msg *Message) []byte {
+	dataLen := len(msg.Data)
+	b := make([]byte, 6+dataLen)
+	b[0] = messageTag
+	for i := uint32(0); i < 4; i++ {
+		b[i+1] = byte((msg.Seq >> (8 * i)) & 0xff)
+	}
+	if msg.Ack {
+		b[5] = 1
+	} else {
+		b[5] = 0
+	}
+	for i := 0; i < dataLen; i++ {
+		b[i+6] = msg.Data[i]
+	}
+	return b
 }
 
-func encodeMessagePacket(msg *Message) ([]byte, error) {
-	b, err := proto.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("%w message: %s", ErrMarshal, err)
+func unmarshalMessagePacket(b []byte, n int, msg *Message) {
+	for i := uint32(0); i < 4; i++ {
+		msg.Seq |= uint32(b[i+1]) << (8 * i)
 	}
-	return append(messageHeader, b...), nil
+	if b[5] == 1 {
+		msg.Ack = true
+	}
+	if len(b) > 6 {
+		msg.Data = b[6:n]
+	}
 }
 
-func encodeAckPacket(ack *Ack) ([]byte, error) {
-	b, err := proto.Marshal(ack)
-	if err != nil {
-		return nil, fmt.Errorf("%w ack: %s", ErrMarshal, err)
+func marshalAckPacket(seq uint32) []byte {
+	b := make([]byte, 5)
+	b[0] = ackTag
+	for i := uint32(0); i < 4; i++ {
+		b[i+1] = byte((seq >> (8 * i)) & 0xff)
 	}
-	return append(ackHeader, b...), nil
+	return b
+}
+
+func unmarshalAckPacket(b []byte) uint32 {
+	r := uint32(0)
+	for i := uint32(0); i < 4; i++ {
+		r |= uint32(b[i+1]) << (8 * i)
+	}
+	return r
 }

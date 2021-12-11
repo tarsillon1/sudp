@@ -18,7 +18,7 @@ func TestNewConn(t *testing.T) {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
 
-	messageChan := make(chan *MessageWithAddr, 1)
+	messageChan := make(chan MessageWithAddr, 1)
 	conn1.Sub(messageChan)
 	go conn1.Poll()
 
@@ -59,7 +59,7 @@ func TestNewConnWithAck(t *testing.T) {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
 
-	messageChan := make(chan *MessageWithAddr, 1)
+	messageChan := make(chan MessageWithAddr, 1)
 	conn1.Sub(messageChan)
 	go conn1.Poll()
 
@@ -80,7 +80,7 @@ func TestNewConnWithAck(t *testing.T) {
 	go func() {
 		err = conn2.Pub(conn1Addr, &Message{
 			Data: []byte(expectedMsg),
-			Ack:  Bool(true),
+			Ack:  true,
 		})
 		if err != nil {
 			errChan <- fmt.Errorf("failed to send message from client: %s", err)
@@ -128,9 +128,10 @@ func TestConnPing(t *testing.T) {
 	}
 
 	milli := d.Milliseconds()
-	if milli > 10 {
+	if milli > 2 {
 		t.Fatalf("unexpectedly long ping pong latency")
 	}
+	fmt.Println(d.Microseconds())
 }
 
 func TestExactlyOnceProcessing(t *testing.T) {
@@ -144,7 +145,7 @@ func TestExactlyOnceProcessing(t *testing.T) {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
 
-	messageChan := make(chan *MessageWithAddr, 2)
+	messageChan := make(chan MessageWithAddr, 2)
 	conn1.Sub(messageChan)
 	go conn1.Poll()
 

@@ -7,21 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"time"
-
-	"google.golang.org/protobuf/proto"
 )
-
-// MessageWithAddr is a message with the address of the sender.
-type MessageWithAddr struct {
-	*Message
-	Addr *net.UDPAddr
-}
-
-// ackWithAddress is a ack with the address of the sender.
-type ackWithAddress struct {
-	*Ack
-	addr *net.UDPAddr
-}
 
 // ConnConfig configures the UDP connection.
 type ConnConfig struct {
@@ -42,8 +28,8 @@ type Conn struct {
 	ackChansMut     *sync.Mutex
 	pongChansMut    *sync.Mutex
 	errChansMut     *sync.Mutex
-	messageChans    []chan *MessageWithAddr
-	ackChans        []chan *ackWithAddress
+	messageChans    []chan MessageWithAddr
+	ackChans        []chan ackWithAddress
 	pongChans       []chan *net.UDPAddr
 	errChans        []chan error
 	cache           *cache
@@ -81,8 +67,8 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 		ackChansMut:     &sync.Mutex{},
 		pongChansMut:    &sync.Mutex{},
 		errChansMut:     &sync.Mutex{},
-		messageChans:    make([]chan *MessageWithAddr, 0),
-		ackChans:        make([]chan *ackWithAddress, 0),
+		messageChans:    make([]chan MessageWithAddr, 0),
+		ackChans:        make([]chan ackWithAddress, 0),
 		pongChans:       make([]chan *net.UDPAddr, 0),
 		errChans:        make([]chan error, 0),
 		cache:           newCache(),
@@ -95,7 +81,7 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 func (c *Conn) Ping(addr *net.UDPAddr) (time.Duration, error) {
 	start := time.Now()
 
-	_, err := c.UDP.WriteToUDP(pingHeader, addr)
+	_, err := c.UDP.WriteToUDP(pingPacket, addr)
 	if err != nil {
 		return time.Duration(0), fmt.Errorf("%w for ping: %s", ErrWrite, err)
 	}
@@ -124,16 +110,13 @@ func (c *Conn) Pub(addr *net.UDPAddr, message *Message) error {
 		message.Seq = c.seq
 	}
 
-	b, err := encodeMessagePacket(message)
-	if err != nil {
-		return err
-	}
-	_, err = c.UDP.WriteToUDP(b, addr)
+	b := marshalMessagePacket(message)
+	_, err := c.UDP.WriteToUDP(b, addr)
 	if err != nil {
 		return fmt.Errorf("%w for pub: %s", ErrWrite, err)
 	}
-	if message.Ack != nil {
-		ackChan := make(chan *ackWithAddress)
+	if message.Ack {
+		ackChan := make(chan ackWithAddress)
 		c.subAck(ackChan)
 		defer c.unsubAck(ackChan)
 
@@ -142,7 +125,7 @@ func (c *Conn) Pub(addr *net.UDPAddr, message *Message) error {
 			retryTimer := time.NewTimer(c.config.AckRetryInterval)
 			select {
 			case ack := <-ackChan:
-				if ack.Id == message.Seq && addr.String() == ack.addr.String() {
+				if ack.seq == message.Seq && addr.String() == ack.addr.String() {
 					return nil
 				}
 			case <-retryTimer.C:
@@ -160,7 +143,7 @@ func (c *Conn) Pub(addr *net.UDPAddr, message *Message) error {
 
 // Sub will publish messages into the provided channel
 // when they are received by the UDP connection from clients.
-func (c *Conn) Sub(messageChan chan *MessageWithAddr) {
+func (c *Conn) Sub(messageChan chan MessageWithAddr) {
 	c.messageChansMut.Lock()
 	defer c.messageChansMut.Unlock()
 	for _, ch := range c.messageChans {
@@ -172,10 +155,10 @@ func (c *Conn) Sub(messageChan chan *MessageWithAddr) {
 }
 
 // Unsub stops the UDP connection from publishing messages into the provided channel.
-func (c *Conn) Unsub(messageChan chan *MessageWithAddr) {
+func (c *Conn) Unsub(messageChan chan MessageWithAddr) {
 	c.messageChansMut.Lock()
 	defer c.messageChansMut.Unlock()
-	newMessageChans := make([]chan *MessageWithAddr, 0)
+	newMessageChans := make([]chan MessageWithAddr, 0)
 	for _, ch := range c.messageChans {
 		if ch != messageChan {
 			newMessageChans = append(newMessageChans, ch)
@@ -235,7 +218,7 @@ func (c *Conn) handlePongPacket(addr *net.UDPAddr) error {
 }
 
 func (c *Conn) pubPong(addr *net.UDPAddr) error {
-	_, err := c.UDP.WriteToUDP(pongHeader, addr)
+	_, err := c.UDP.WriteToUDP(pongPacket, addr)
 	if err != nil {
 		return fmt.Errorf("%w for pong: %s", ErrWrite, err)
 	}
@@ -266,19 +249,16 @@ func (c *Conn) unsubPong(pongChan chan *net.UDPAddr) {
 }
 
 // pubAck publishes a ack to a client.
-func (c *Conn) pubAck(addr *net.UDPAddr, ack *Ack) error {
-	b, err := encodeAckPacket(ack)
-	if err != nil {
-		return err
-	}
-	_, err = c.UDP.WriteToUDP(b, addr)
+func (c *Conn) pubAck(addr *net.UDPAddr, seq uint32) error {
+	b := marshalAckPacket(seq)
+	_, err := c.UDP.WriteToUDP(b, addr)
 	if err != nil {
 		return fmt.Errorf("%w for ack: %s", ErrWrite, err)
 	}
 	return nil
 }
 
-func (c *Conn) subAck(ackChan chan *ackWithAddress) {
+func (c *Conn) subAck(ackChan chan ackWithAddress) {
 	c.ackChansMut.Lock()
 	defer c.ackChansMut.Unlock()
 	for _, ch := range c.ackChans {
@@ -289,10 +269,10 @@ func (c *Conn) subAck(ackChan chan *ackWithAddress) {
 	c.ackChans = append(c.ackChans, ackChan)
 }
 
-func (c *Conn) unsubAck(ackChan chan *ackWithAddress) {
+func (c *Conn) unsubAck(ackChan chan ackWithAddress) {
 	c.ackChansMut.Lock()
 	defer c.ackChansMut.Unlock()
-	newAckChans := make([]chan *ackWithAddress, 0)
+	newAckChans := make([]chan ackWithAddress, 0)
 	for _, ch := range c.ackChans {
 		if ch != ackChan {
 			newAckChans = append(newAckChans, ch)
@@ -301,28 +281,25 @@ func (c *Conn) unsubAck(ackChan chan *ackWithAddress) {
 	c.ackChans = newAckChans
 }
 
-func (c *Conn) handleMessagePacket(addr *net.UDPAddr, b []byte) error {
-	message := Message{}
-	err := proto.Unmarshal(b, &message)
-	if err != nil {
-		return fmt.Errorf("%w for message: %s", ErrUnmarshal, err)
-	}
+func (c *Conn) handleMessagePacket(addr *net.UDPAddr, n int) error {
+	msg := Message{}
+	unmarshalMessagePacket(c.readBuffer, n, &msg)
 
-	if message.Ack != nil && *message.Ack {
-		err = c.pubAck(addr, &Ack{Id: message.Seq})
+	if msg.Ack {
+		err := c.pubAck(addr, msg.Seq)
 		if err != nil {
 			return err
 		}
 	}
 
 	strAddr := addr.String()
-	if c.cache.has(strAddr, message.Seq) {
+	if c.cache.has(strAddr, msg.Seq) {
 		return nil // Message with this addr + seq has already been processed.
 	}
-	c.cache.set(strAddr, message.Seq, c.config.AckTimeout)
+	c.cache.set(strAddr, msg.Seq, c.config.AckTimeout)
 
-	messageWithAddr := &MessageWithAddr{
-		Message: &message,
+	messageWithAddr := MessageWithAddr{
+		Message: msg,
 		Addr:    addr,
 	}
 	for _, ch := range c.messageChans {
@@ -331,15 +308,11 @@ func (c *Conn) handleMessagePacket(addr *net.UDPAddr, b []byte) error {
 	return nil
 }
 
-func (c *Conn) handleAckPacket(addr *net.UDPAddr, b []byte) error {
-	ack := Ack{}
-	err := proto.Unmarshal(b, &ack)
-	if err != nil {
-		return fmt.Errorf("%w for ack: %s", ErrUnmarshal, err)
-	}
+func (c *Conn) handleAckPacket(addr *net.UDPAddr) error {
+	seq := unmarshalAckPacket(c.readBuffer)
 	for _, ch := range c.ackChans {
-		ch <- &ackWithAddress{
-			Ack:  &ack,
+		ch <- ackWithAddress{
+			seq:  seq,
 			addr: addr,
 		}
 	}
@@ -359,16 +332,15 @@ func (c *Conn) readPacket() error {
 		return fmt.Errorf("%w: %s", ErrRead, err)
 	}
 	packetType := c.readBuffer[0]
-	packetBytes := c.readBuffer[1:n]
 	switch packetType {
 	case pingTag:
 		return c.pubPong(addr)
 	case pongTag:
 		return c.handlePongPacket(addr)
 	case ackTag:
-		return c.handleAckPacket(addr, packetBytes)
+		return c.handleAckPacket(addr)
 	case messageTag:
-		return c.handleMessagePacket(addr, packetBytes)
+		return c.handleMessagePacket(addr, n)
 	}
 	return ErrUnknownType
 }
