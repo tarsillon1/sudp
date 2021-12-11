@@ -28,6 +28,7 @@ type Conn struct {
 	ackChansMut     *sync.Mutex
 	pongChansMut    *sync.Mutex
 	errChansMut     *sync.Mutex
+	seqMut          *sync.Mutex
 	messageChans    []chan MessageWithAddr
 	ackChans        []chan ackWithAddress
 	pongChans       []chan *net.UDPAddr
@@ -67,6 +68,7 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 		ackChansMut:     &sync.Mutex{},
 		pongChansMut:    &sync.Mutex{},
 		errChansMut:     &sync.Mutex{},
+		seqMut:          &sync.Mutex{},
 		messageChans:    make([]chan MessageWithAddr, 0),
 		ackChans:        make([]chan ackWithAddress, 0),
 		pongChans:       make([]chan *net.UDPAddr, 0),
@@ -106,8 +108,7 @@ func (c *Conn) Ping(addr *net.UDPAddr) (time.Duration, error) {
 // Pub publishes a message to a client.
 func (c *Conn) Pub(addr *net.UDPAddr, message *Message) error {
 	if message.Seq == 0 {
-		c.seq++
-		message.Seq = c.seq
+		message.Seq = c.nextSeq()
 	}
 
 	b := marshalMessagePacket(message)
@@ -193,11 +194,14 @@ func (c *Conn) UnsubErr(errChan chan error) {
 // Poll starts reading UDP packets on a loop.
 // This loop is terminated when program is interrupted.
 func (c *Conn) Poll() {
-	ch := make(chan os.Signal, 5)
-	signal.Notify(ch, os.Interrupt)
+	termCh := make(chan os.Signal, 5)
+	signal.Notify(termCh, os.Interrupt)
 	for {
 		select {
-		case <-ch:
+		case <-termCh:
+			for _, ch := range c.messageChans {
+				close(ch)
+			}
 			return
 		default:
 		}
@@ -208,6 +212,18 @@ func (c *Conn) Poll() {
 			}
 		}
 	}
+}
+
+func (c *Conn) nextSeq() uint32 {
+	c.seqMut.Lock()
+	defer c.seqMut.Unlock()
+
+	c.seq++
+	seq := c.seq
+	if c.seq == maxSeq {
+		c.seq = 0
+	}
+	return seq
 }
 
 func (c *Conn) handlePongPacket(addr *net.UDPAddr) error {
@@ -339,7 +355,7 @@ func (c *Conn) readPacket() error {
 		return c.handlePongPacket(addr)
 	case ackTag:
 		return c.handleAckPacket(addr)
-	case messageTag:
+	case messageWithAckTag, messageTag:
 		return c.handleMessagePacket(addr, n)
 	}
 	return ErrUnknownType

@@ -8,7 +8,7 @@ import (
 )
 
 func TestNewConn(t *testing.T) {
-	conn1Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8080")
+	conn1Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8079")
 	if err != nil {
 		t.Fatalf("failed to resolve udp addr: %s", err)
 	}
@@ -131,7 +131,6 @@ func TestConnPing(t *testing.T) {
 	if milli > 2 {
 		t.Fatalf("unexpectedly long ping pong latency")
 	}
-	fmt.Println(d.Microseconds())
 }
 
 func TestExactlyOnceProcessing(t *testing.T) {
