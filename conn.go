@@ -3,8 +3,6 @@ package sudp
 import (
 	"fmt"
 	"net"
-	"os"
-	"os/signal"
 	"sync"
 	"time"
 )
@@ -35,6 +33,7 @@ type Conn struct {
 	errChans        []chan error
 	cache           *cache
 	seq             uint32
+	isClosed        bool
 }
 
 // NewConn creates a new UDP connection.
@@ -192,19 +191,8 @@ func (c *Conn) UnsubErr(errChan chan error) {
 }
 
 // Poll starts reading UDP packets on a loop.
-// This loop is terminated when program is interrupted.
 func (c *Conn) Poll() {
-	termCh := make(chan os.Signal, 5)
-	signal.Notify(termCh, os.Interrupt)
-	for {
-		select {
-		case <-termCh:
-			for _, ch := range c.messageChans {
-				close(ch)
-			}
-			return
-		default:
-		}
+	for !c.isClosed {
 		err := c.readPacket()
 		if err != nil {
 			for _, ch := range c.errChans {
@@ -212,6 +200,15 @@ func (c *Conn) Poll() {
 			}
 		}
 	}
+}
+
+// Close closes the UDP connection.
+func (c *Conn) Close() error {
+	c.isClosed = true
+	for _, ch := range c.messageChans {
+		close(ch)
+	}
+	return c.UDP.Close()
 }
 
 func (c *Conn) nextSeq() uint32 {
