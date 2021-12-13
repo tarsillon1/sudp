@@ -21,13 +21,12 @@ type Conn struct {
 	UDP             *net.UDPConn
 	config          *ConnConfig
 	readBuffer      []byte
-	readMut         *sync.Mutex
 	messageChansMut *sync.Mutex
 	ackChansMut     *sync.Mutex
 	pongChansMut    *sync.Mutex
 	errChansMut     *sync.Mutex
 	seqMut          *sync.Mutex
-	messageChans    []chan MessageWithAddr
+	messageChans    []chan Message
 	ackChans        []chan ackWithAddress
 	pongChans       []chan *net.UDPAddr
 	errChans        []chan error
@@ -62,13 +61,12 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 		UDP:             serv,
 		config:          conf,
 		readBuffer:      make([]byte, conf.MaxPacketSize),
-		readMut:         &sync.Mutex{},
 		messageChansMut: &sync.Mutex{},
 		ackChansMut:     &sync.Mutex{},
 		pongChansMut:    &sync.Mutex{},
 		errChansMut:     &sync.Mutex{},
 		seqMut:          &sync.Mutex{},
-		messageChans:    make([]chan MessageWithAddr, 0),
+		messageChans:    make([]chan Message, 0),
 		ackChans:        make([]chan ackWithAddress, 0),
 		pongChans:       make([]chan *net.UDPAddr, 0),
 		errChans:        make([]chan error, 0),
@@ -105,45 +103,46 @@ func (c *Conn) Ping(addr *net.UDPAddr) (time.Duration, error) {
 }
 
 // Pub publishes a message to a client.
-func (c *Conn) Pub(addr *net.UDPAddr, message *Message) error {
-	if message.Seq == 0 {
-		message.Seq = c.nextSeq()
+func (c *Conn) Pub(msg *Message) error {
+	if msg.Seq == 0 {
+		msg.Seq = c.nextSeq()
 	}
 
-	b := marshalMessagePacket(message)
-	_, err := c.UDP.WriteToUDP(b, addr)
+	b := marshalMessagePacket(msg)
+	_, err := c.UDP.WriteToUDP(b, msg.To)
 	if err != nil {
 		return fmt.Errorf("%w for pub: %s", ErrWrite, err)
 	}
-	if message.Ack {
-		ackChan := make(chan ackWithAddress)
-		c.subAck(ackChan)
-		defer c.unsubAck(ackChan)
+	if !msg.Ack {
+		return nil
+	}
 
-		timeoutTimer := time.NewTimer(c.config.AckTimeout)
-		for {
-			retryTimer := time.NewTimer(c.config.AckRetryInterval)
-			select {
-			case ack := <-ackChan:
-				if ack.seq == message.Seq && addr.String() == ack.addr.String() {
-					return nil
-				}
-			case <-retryTimer.C:
-				_, err = c.UDP.WriteToUDP(b, addr)
-				if err != nil {
-					return fmt.Errorf("%w for pub retry: %s", ErrWrite, err)
-				}
-			case <-timeoutTimer.C:
-				return ErrAckTimeout
+	ackChan := make(chan ackWithAddress)
+	c.subAck(ackChan)
+	defer c.unsubAck(ackChan)
+
+	timeoutTimer := time.NewTimer(c.config.AckTimeout)
+	for {
+		retryTimer := time.NewTimer(c.config.AckRetryInterval)
+		select {
+		case ack := <-ackChan:
+			if ack.seq == msg.Seq && msg.To.String() == ack.addr.String() {
+				return nil
 			}
+		case <-retryTimer.C:
+			_, err = c.UDP.WriteToUDP(b, msg.To)
+			if err != nil {
+				return fmt.Errorf("%w for pub retry: %s", ErrWrite, err)
+			}
+		case <-timeoutTimer.C:
+			return ErrAckTimeout
 		}
 	}
-	return nil
 }
 
 // Sub will publish messages into the provided channel
 // when they are received by the UDP connection from clients.
-func (c *Conn) Sub(messageChan chan MessageWithAddr) {
+func (c *Conn) Sub(messageChan chan Message) {
 	c.messageChansMut.Lock()
 	defer c.messageChansMut.Unlock()
 	for _, ch := range c.messageChans {
@@ -155,10 +154,10 @@ func (c *Conn) Sub(messageChan chan MessageWithAddr) {
 }
 
 // Unsub stops the UDP connection from publishing messages into the provided channel.
-func (c *Conn) Unsub(messageChan chan MessageWithAddr) {
+func (c *Conn) Unsub(messageChan chan Message) {
 	c.messageChansMut.Lock()
 	defer c.messageChansMut.Unlock()
-	newMessageChans := make([]chan MessageWithAddr, 0)
+	newMessageChans := make([]chan Message, 0)
 	for _, ch := range c.messageChans {
 		if ch != messageChan {
 			newMessageChans = append(newMessageChans, ch)
@@ -306,17 +305,13 @@ func (c *Conn) handleMessagePacket(addr *net.UDPAddr, n int) error {
 	}
 
 	strAddr := addr.String()
-	if c.cache.has(strAddr, msg.Seq) {
+	if !c.cache.set(strAddr, msg.Seq, c.config.AckTimeout) {
 		return nil // Message with this addr + seq has already been processed.
 	}
-	c.cache.set(strAddr, msg.Seq, c.config.AckTimeout)
 
-	messageWithAddr := MessageWithAddr{
-		Message: msg,
-		Addr:    addr,
-	}
+	msg.To = addr
 	for _, ch := range c.messageChans {
-		ch <- messageWithAddr
+		ch <- msg
 	}
 	return nil
 }
@@ -337,9 +332,6 @@ func (c *Conn) handleAckPacket(addr *net.UDPAddr) error {
 // Each packet starts with a header describing the type of the packet.
 // The first byte represents the type of packet (limit of 256 different types of packets).
 func (c *Conn) readPacket() error {
-	c.readMut.Lock()
-	defer c.readMut.Unlock()
-
 	n, addr, err := c.UDP.ReadFromUDP(c.readBuffer)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrRead, err)

@@ -4,15 +4,10 @@ import "net"
 
 // Message respresents a message.
 type Message struct {
-	Seq  uint32
-	Data []byte
-	Ack  bool
-}
-
-// MessageWithAddr is a message with the address of the sender.
-type MessageWithAddr struct {
-	Message
-	Addr *net.UDPAddr
+	To   *net.UDPAddr // Address of the recipient.
+	Seq  uint32       // Unique message sequence number.
+	Data []byte       // The bytes to send to the recipient.
+	Ack  bool         // True if this message should be acknowledged by recipient.
 }
 
 type ackWithAddress struct {
