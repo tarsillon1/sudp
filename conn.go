@@ -3,6 +3,7 @@ package sudp
 import (
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -18,21 +19,17 @@ type ConnConfig struct {
 
 // Conn a simple UDP connection.
 type Conn struct {
-	UDP             *net.UDPConn
-	config          *ConnConfig
-	readBuffer      []byte
-	messageChansMut *sync.Mutex
-	ackChansMut     *sync.Mutex
-	pongChansMut    *sync.Mutex
-	errChansMut     *sync.Mutex
-	seqMut          *sync.Mutex
-	messageChans    []chan Message
-	ackChans        []chan ackWithAddress
-	pongChans       []chan *net.UDPAddr
-	errChans        []chan error
-	cache           *cache
-	seq             uint32
-	isClosed        bool
+	UDP          *net.UDPConn
+	config       *ConnConfig
+	closeMut     *sync.Mutex
+	ackChansMut  *sync.Mutex
+	pongChansMut *sync.Mutex
+	seqMut       *sync.Mutex
+	ackChans     []chan ackWithAddress
+	pongChans    []chan *net.UDPAddr
+	cache        *cache
+	seq          uint32
+	isClosed     bool
 }
 
 // NewConn creates a new UDP connection.
@@ -58,20 +55,16 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 		return nil, fmt.Errorf("%w: %s", ErrConn, err)
 	}
 	conn := &Conn{
-		UDP:             serv,
-		config:          conf,
-		readBuffer:      make([]byte, conf.MaxPacketSize),
-		messageChansMut: &sync.Mutex{},
-		ackChansMut:     &sync.Mutex{},
-		pongChansMut:    &sync.Mutex{},
-		errChansMut:     &sync.Mutex{},
-		seqMut:          &sync.Mutex{},
-		messageChans:    make([]chan Message, 0),
-		ackChans:        make([]chan ackWithAddress, 0),
-		pongChans:       make([]chan *net.UDPAddr, 0),
-		errChans:        make([]chan error, 0),
-		cache:           newCache(),
-		seq:             0,
+		UDP:          serv,
+		config:       conf,
+		closeMut:     &sync.Mutex{},
+		ackChansMut:  &sync.Mutex{},
+		pongChansMut: &sync.Mutex{},
+		seqMut:       &sync.Mutex{},
+		ackChans:     make([]chan ackWithAddress, 0),
+		pongChans:    make([]chan *net.UDPAddr, 0),
+		cache:        newCache(),
+		seq:          0,
 	}
 	return conn, err
 }
@@ -140,73 +133,54 @@ func (c *Conn) Pub(msg *Message) error {
 	}
 }
 
-// Sub will publish messages into the provided channel
-// when they are received by the UDP connection from clients.
-func (c *Conn) Sub(messageChan chan Message) {
-	c.messageChansMut.Lock()
-	defer c.messageChansMut.Unlock()
-	for _, ch := range c.messageChans {
-		if ch == messageChan {
-			return
-		}
-	}
-	c.messageChans = append(c.messageChans, messageChan)
-}
+// Poll starts a go routine that reads and handles UDP packets on a loop.
+// Multiple goroutines may invoke Poll simultaneously.
+//
+// This function returns two channels of which need to be read from in order to avoid deadlock:
+//    chan *Message - used to handle messages received while polling.
+//    chan error    - used to handle errors encountered while polling.
+//
+// These channels will automatically be closed when the polling loop is terminated.
+// The polling loop will be termianted when Conn.Close() is invoked.
+func (c *Conn) Poll() (chan *Message, chan error, func()) {
+	doneChan := make(chan bool)
+	errChan := make(chan error, errChanSize)
+	msgChan := make(chan *Message, msgChanSize)
 
-// Unsub stops the UDP connection from publishing messages into the provided channel.
-func (c *Conn) Unsub(messageChan chan Message) {
-	c.messageChansMut.Lock()
-	defer c.messageChansMut.Unlock()
-	newMessageChans := make([]chan Message, 0)
-	for _, ch := range c.messageChans {
-		if ch != messageChan {
-			newMessageChans = append(newMessageChans, ch)
-		}
-	}
-	c.messageChans = newMessageChans
-}
+	isClosed := false
+	closeLoop := func() {
+		c.closeMut.Lock()
+		defer c.closeMut.Unlock()
 
-func (c *Conn) SubErr(errChan chan error) {
-	c.errChansMut.Lock()
-	defer c.errChansMut.Unlock()
-	for _, ch := range c.errChans {
-		if ch == errChan {
-			return
-		}
+		isClosed = true
+		c.UDP.SetReadDeadline(time.Now()) // Set read deadline to escape blocking ReadFromUDP invocation.
+		<-doneChan
+		c.UDP.SetReadDeadline(timeZeroVal) // Reset read deadline.
 	}
-	c.errChans = append(c.errChans, errChan)
-}
 
-func (c *Conn) UnsubErr(errChan chan error) {
-	c.errChansMut.Lock()
-	defer c.errChansMut.Unlock()
-	newErrChans := make([]chan error, 0)
-	for _, ch := range c.errChans {
-		if ch != errChan {
-			newErrChans = append(newErrChans, ch)
-		}
-	}
-	c.errChans = newErrChans
-}
+	go func() {
+		defer close(doneChan)
+		defer close(errChan)
+		defer close(msgChan)
 
-// Poll starts reading UDP packets on a loop.
-func (c *Conn) Poll() {
-	for !c.isClosed {
-		err := c.readPacket()
-		if err != nil {
-			for _, ch := range c.errChans {
-				ch <- err
+		buff := make([]byte, c.config.MaxPacketSize)
+		for !c.isClosed && !isClosed {
+			msg, err := c.handlePacket(buff)
+
+			if err != nil && !os.IsTimeout(err) && !c.isClosed && !isClosed {
+				errChan <- err
+			}
+			if msg != nil {
+				msgChan <- msg
 			}
 		}
-	}
+	}()
+	return msgChan, errChan, closeLoop
 }
 
 // Close closes the UDP connection.
 func (c *Conn) Close() error {
 	c.isClosed = true
-	for _, ch := range c.messageChans {
-		close(ch)
-	}
 	return c.UDP.Close()
 }
 
@@ -220,21 +194,6 @@ func (c *Conn) nextSeq() uint32 {
 		c.seq = 0
 	}
 	return seq
-}
-
-func (c *Conn) handlePongPacket(addr *net.UDPAddr) error {
-	for _, ch := range c.pongChans {
-		ch <- addr
-	}
-	return nil
-}
-
-func (c *Conn) pubPong(addr *net.UDPAddr) error {
-	_, err := c.UDP.WriteToUDP(pongPacket, addr)
-	if err != nil {
-		return fmt.Errorf("%w for pong: %s", ErrWrite, err)
-	}
-	return nil
 }
 
 func (c *Conn) subPong(pongChan chan *net.UDPAddr) {
@@ -293,31 +252,26 @@ func (c *Conn) unsubAck(ackChan chan ackWithAddress) {
 	c.ackChans = newAckChans
 }
 
-func (c *Conn) handleMessagePacket(addr *net.UDPAddr, n int) error {
-	msg := Message{}
-	unmarshalMessagePacket(c.readBuffer, n, &msg)
+func (c *Conn) handleMessagePacket(buff []byte, n int, addr *net.UDPAddr) (*Message, error) {
+	msg := unmarshalMessagePacket(buff, n)
 
 	if msg.Ack {
 		err := c.pubAck(addr, msg.Seq)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	strAddr := addr.String()
-	if !c.cache.set(strAddr, msg.Seq, c.config.AckTimeout) {
-		return nil // Message with this addr + seq has already been processed.
+	if !c.cache.set(addr.String(), msg.Seq, c.config.AckTimeout) {
+		return nil, nil // Message with this addr + seq has already been processed.
 	}
 
 	msg.To = addr
-	for _, ch := range c.messageChans {
-		ch <- msg
-	}
-	return nil
+	return msg, nil
 }
 
-func (c *Conn) handleAckPacket(addr *net.UDPAddr) error {
-	seq := unmarshalAckPacket(c.readBuffer)
+func (c *Conn) handleAckPacket(buff []byte, addr *net.UDPAddr) error {
+	seq := unmarshalAckPacket(buff)
 	for _, ch := range c.ackChans {
 		ch <- ackWithAddress{
 			seq:  seq,
@@ -327,25 +281,42 @@ func (c *Conn) handleAckPacket(addr *net.UDPAddr) error {
 	return nil
 }
 
-// readPacket reads the next packet from a UDP connection.
+func (c *Conn) handlePongPacket(addr *net.UDPAddr) error {
+	for _, ch := range c.pongChans {
+		ch <- addr
+	}
+	return nil
+}
+
+func (c *Conn) handlePingPacket(addr *net.UDPAddr) error {
+	_, err := c.UDP.WriteToUDP(pongPacket, addr)
+	if err != nil {
+		return fmt.Errorf("%w for pong: %s", ErrWrite, err)
+	}
+	return nil
+}
+
+// handlePacket reads and handles the next packet from a UDP connection.
 //
 // Each packet starts with a header describing the type of the packet.
 // The first byte represents the type of packet (limit of 256 different types of packets).
-func (c *Conn) readPacket() error {
-	n, addr, err := c.UDP.ReadFromUDP(c.readBuffer)
+func (c *Conn) handlePacket(buff []byte) (*Message, error) {
+	n, addr, err := c.UDP.ReadFromUDP(buff)
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrRead, err)
+		if os.IsTimeout(err) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", ErrRead, err)
 	}
-	packetType := c.readBuffer[0]
-	switch packetType {
+	switch buff[0] {
 	case pingTag:
-		return c.pubPong(addr)
+		return nil, c.handlePingPacket(addr)
 	case pongTag:
-		return c.handlePongPacket(addr)
+		return nil, c.handlePongPacket(addr)
 	case ackTag:
-		return c.handleAckPacket(addr)
+		return nil, c.handleAckPacket(buff, addr)
 	case messageWithAckTag, messageTag:
-		return c.handleMessagePacket(addr, n)
+		return c.handleMessagePacket(buff, n, addr)
 	}
-	return ErrUnknownType
+	return nil, ErrUnknownType
 }

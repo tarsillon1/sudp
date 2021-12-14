@@ -17,10 +17,9 @@ func TestNewConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
+	defer conn1.Close()
 
-	messageChan := make(chan Message, 1)
-	conn1.Sub(messageChan)
-	go conn1.Poll()
+	msgChan, errChan, _ := conn1.Poll()
 
 	const expectedMsg = "hello world"
 
@@ -42,10 +41,17 @@ func TestNewConn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to send message from client: %s", err)
 	}
+	defer conn2.Close()
 
-	msg := <-messageChan
+	msg := <-msgChan
 	if string(msg.Data) != expectedMsg {
 		t.Fatalf("got unexpected message: %s", string(msg.Data))
+	}
+
+	select {
+	case err := <-errChan:
+		t.Fatalf("got error %s", err)
+	default:
 	}
 }
 
@@ -59,10 +65,9 @@ func TestNewConnWithAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
+	defer conn1.Close()
 
-	messageChan := make(chan Message, 1)
-	conn1.Sub(messageChan)
-	go conn1.Poll()
+	msgChan, errChan, _ := conn1.Poll()
 
 	const expectedMsg = "hello world"
 
@@ -75,9 +80,9 @@ func TestNewConnWithAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp client: %s", err)
 	}
+	defer conn2.Close()
 	go conn2.Poll()
 
-	errChan := make(chan error)
 	go func() {
 		err = conn2.Pub(&Message{
 			To:   conn1Addr,
@@ -87,17 +92,17 @@ func TestNewConnWithAck(t *testing.T) {
 		if err != nil {
 			errChan <- fmt.Errorf("failed to send message from client: %s", err)
 		}
-		close(errChan)
+		errChan <- nil
 	}()
 
-	msg := <-messageChan
+	msg := <-msgChan
 	if string(msg.Data) != expectedMsg {
 		t.Fatalf("got unexpected message: %s", string(msg.Data))
 	}
 
 	err = <-errChan
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("got error %s", err)
 	}
 }
 
@@ -111,6 +116,7 @@ func TestConnPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
+	defer conn1.Close()
 	go conn1.Poll()
 
 	conn2Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
@@ -128,12 +134,12 @@ func TestConnPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to ping udp server: %s", err)
 	}
+	defer conn2.Close()
 
 	milli := d.Milliseconds()
 	if milli > 2 {
 		t.Fatalf("unexpectedly long ping pong latency")
 	}
-	fmt.Println(d.Microseconds())
 }
 
 func TestExactlyOnceProcessing(t *testing.T) {
@@ -146,10 +152,9 @@ func TestExactlyOnceProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp server: %s", err)
 	}
+	defer conn1.Close()
 
-	messageChan := make(chan Message, 2)
-	conn1.Sub(messageChan)
-	go conn1.Poll()
+	msgChan, errChan, _ := conn1.Poll()
 
 	conn2Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
@@ -160,6 +165,7 @@ func TestExactlyOnceProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to init udp client: %s", err)
 	}
+	defer conn2.Close()
 	go conn2.Poll()
 
 	msg := &Message{To: conn1Addr, Data: []byte("hello world")}
@@ -172,11 +178,72 @@ func TestExactlyOnceProcessing(t *testing.T) {
 		t.Fatalf("failed to send message: %s", err)
 	}
 
-	<-messageChan
+	<-msgChan
 	select {
-	case <-messageChan:
+	case err := <-errChan:
+		t.Fatalf("got error %s", err)
+	case <-msgChan:
 		t.Fatal("received unexpected message")
 	case <-time.NewTimer(time.Second).C:
 		break
+	}
+}
+
+func TestMultiplePoll(t *testing.T) {
+	conn1Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8083")
+	if err != nil {
+		t.Fatalf("failed to resolve udp addr: %s", err)
+	}
+
+	conn1, err := NewConn(&ConnConfig{Addr: conn1Addr})
+	if err != nil {
+		t.Fatalf("failed to init udp server: %s", err)
+	}
+
+	msgChan1, errChan1, close1 := conn1.Poll()
+
+	msgChan2, errChan2, _ := conn1.Poll()
+
+	conn2Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to resolve local udp address: %s", err)
+	}
+
+	conn2, err := NewConn(&ConnConfig{Addr: conn2Addr})
+	if err != nil {
+		t.Fatalf("failed to init udp client: %s", err)
+	}
+	defer conn2.Close()
+
+	msg := &Message{To: conn1Addr, Data: []byte("hello world")}
+	err = conn2.Pub(msg)
+	if err != nil {
+		t.Fatalf("failed to send message: %s", err)
+	}
+
+	select {
+	case <-msgChan1:
+	case <-msgChan2:
+	}
+
+	close1()
+
+	msg = &Message{To: conn1Addr, Data: []byte("hello again")}
+	err = conn2.Pub(msg)
+	if err != nil {
+		t.Fatalf("failed to send message: %s", err)
+	}
+
+	<-msgChan2
+
+	conn1.Close()
+
+	err = <-errChan1
+	if err != nil {
+		t.Fatalf("got unexpected err: %s", err)
+	}
+	err = <-errChan2
+	if err != nil {
+		t.Fatalf("got unexpected err: %s", err)
 	}
 }
