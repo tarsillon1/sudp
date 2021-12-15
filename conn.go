@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+const (
+	defaultMaxPacketSize    = 8192
+	defaultPongTimeout      = time.Second * 2
+	defaultAckRetryInterval = time.Millisecond * 500
+	defaultAckTimeout       = time.Second * 5
+)
+
+var (
+	timeZeroVal = time.Time{}
+	maxSeq      = uint32(4294967295)
+	errChanSize = 10
+	msgChanSize = 10
+)
+
 // ConnConfig configures the UDP connection.
 type ConnConfig struct {
 	Addr             *net.UDPAddr
@@ -50,12 +64,12 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 		conf.AckTimeout = defaultAckTimeout
 	}
 
-	serv, err := net.ListenUDP("udp", conf.Addr)
+	udp, err := net.ListenUDP("udp", conf.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrConn, err)
 	}
 	conn := &Conn{
-		UDP:          serv,
+		UDP:          udp,
 		config:       conf,
 		closeMut:     &sync.Mutex{},
 		ackChansMut:  &sync.Mutex{},
