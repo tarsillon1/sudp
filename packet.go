@@ -5,16 +5,16 @@ import "net"
 /* Packet Tags */
 
 const (
-	pingTag           = 0 // A ping sent to a specified UDP address.
-	pongTag           = 1 // A pong sent from the receiver of a ping back to its sender.
-	ackTag            = 2 // An acknowledgement from message receiver to original sender.
-	messageTag        = 3 // A message that does not require acknowledgment by receiver.
-	messageWithAckTag = 4 // A message that does requires acknowledgment by receiver.
+	tagPing           = 0 // A ping sent to a specified UDP address.
+	tagPong           = 1 // A pong sent from the receiver of a ping back to its sender.
+	tagAck            = 2 // An acknowledgement from message receiver to original sender.
+	tagMessage        = 3 // A message that does not require acknowledgment by receiver.
+	tagMessageWithAck = 4 // A message that does requires acknowledgment by receiver.
 )
 
 var (
-	pingPacket = []byte{pingTag}
-	pongPacket = []byte{pongTag}
+	packetPing = []byte{tagPing}
+	packetPong = []byte{tagPong}
 )
 
 // Message respresents a message.
@@ -36,9 +36,9 @@ func marshalMessagePacket(msg *Message) []byte {
 	dataLen := len(msg.Data)
 	b := make([]byte, 5+dataLen)
 	if msg.Ack {
-		b[0] = messageWithAckTag
+		b[0] = tagMessageWithAck
 	} else {
-		b[0] = messageTag
+		b[0] = tagMessage
 	}
 	for i := uint32(0); i < 4; i++ {
 		b[i+1] = byte((msg.Seq >> (8 * i)) & 0xff)
@@ -57,7 +57,7 @@ func marshalMessagePacket(msg *Message) []byte {
 //    3. Set Message.Data to the remaining byte until specified index n.
 func unmarshalMessagePacket(b []byte, n int) *Message {
 	msg := &Message{}
-	if b[0] == messageWithAckTag {
+	if b[0] == tagMessageWithAck {
 		msg.Ack = true
 	}
 	for i := uint32(0); i < 4; i++ {
@@ -77,7 +77,7 @@ type ackWithAddress struct {
 // marshalAckPacket converts a uint32 representing a message sequence number to bytes.
 func marshalAckPacket(seq uint32) []byte {
 	b := make([]byte, 5)
-	b[0] = ackTag
+	b[0] = tagAck
 	for i := uint32(0); i < 4; i++ {
 		b[i+1] = byte((seq >> (8 * i)) & 0xff)
 	}

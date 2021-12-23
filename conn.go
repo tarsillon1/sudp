@@ -87,7 +87,7 @@ func NewConn(conf *ConnConfig) (*Conn, error) {
 func (c *Conn) Ping(addr *net.UDPAddr) (time.Duration, error) {
 	start := time.Now()
 
-	_, err := c.UDP.WriteToUDP(pingPacket, addr)
+	_, err := c.UDP.WriteToUDP(packetPing, addr)
 	if err != nil {
 		return time.Duration(0), fmt.Errorf("%w for ping: %s", ErrWrite, err)
 	}
@@ -303,7 +303,7 @@ func (c *Conn) handlePongPacket(addr *net.UDPAddr) error {
 }
 
 func (c *Conn) handlePingPacket(addr *net.UDPAddr) error {
-	_, err := c.UDP.WriteToUDP(pongPacket, addr)
+	_, err := c.UDP.WriteToUDP(packetPong, addr)
 	if err != nil {
 		return fmt.Errorf("%w for pong: %s", ErrWrite, err)
 	}
@@ -323,13 +323,13 @@ func (c *Conn) handlePacket(buff []byte) (*Message, error) {
 		return nil, fmt.Errorf("%w: %s", ErrRead, err)
 	}
 	switch buff[0] {
-	case pingTag:
+	case tagPing:
 		return nil, c.handlePingPacket(addr)
-	case pongTag:
+	case tagPong:
 		return nil, c.handlePongPacket(addr)
-	case ackTag:
+	case tagAck:
 		return nil, c.handleAckPacket(buff, addr)
-	case messageWithAckTag, messageTag:
+	case tagMessageWithAck, tagMessage:
 		return c.handleMessagePacket(buff, n, addr)
 	}
 	return nil, ErrUnknownType
