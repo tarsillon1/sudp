@@ -34,7 +34,7 @@ func TestNewConn(t *testing.T) {
 	}
 	go conn2.Poll()
 
-	err = conn2.Pub(&Message{
+	_, err = conn2.Pub(&Message{
 		To:   conn1Addr,
 		Data: []byte(expectedMsg),
 	})
@@ -70,6 +70,7 @@ func TestNewConnWithAck(t *testing.T) {
 	msgChan, errChan, _ := conn1.Poll()
 
 	const expectedMsg = "hello world"
+	const expectedAck = "foo bar"
 
 	conn2Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
@@ -83,26 +84,52 @@ func TestNewConnWithAck(t *testing.T) {
 	defer conn2.Close()
 	go conn2.Poll()
 
+	pubMsg := &Message{
+		To:   conn1Addr,
+		Data: []byte(expectedMsg),
+		Ack:  true,
+	}
 	go func() {
-		err = conn2.Pub(&Message{
-			To:   conn1Addr,
-			Data: []byte(expectedMsg),
-			Ack:  true,
-		})
+		ack, err := conn2.Pub(pubMsg)
 		if err != nil {
 			errChan <- fmt.Errorf("failed to send message from client: %s", err)
+			return
+		}
+		strAck := string(ack.Data)
+		strExpectedAck := string(expectedAck)
+		if strAck != strExpectedAck {
+			errChan <- fmt.Errorf("received unexpected ack data: got [%s], expected [%s]", strAck, strExpectedAck)
+			return
 		}
 		errChan <- nil
 	}()
 
-	msg := <-msgChan
-	if string(msg.Data) != expectedMsg {
-		t.Fatalf("got unexpected message: %s", string(msg.Data))
+	resMsg := <-msgChan
+	if string(resMsg.Data) != expectedMsg {
+		t.Fatalf("got unexpected message: %s", string(resMsg.Data))
 	}
+	if !resMsg.Ack {
+		t.Fatalf("unexpected message ack value: %v", resMsg.Ack)
+	}
+	conn1.Ack(&Ack{
+		To:   resMsg.From,
+		Seq:  resMsg.Seq,
+		Data: []byte(expectedAck),
+	})
 
 	err = <-errChan
 	if err != nil {
 		t.Fatalf("got error %s", err)
+	}
+
+	ack, err := conn2.Pub(pubMsg)
+	if err != nil {
+		t.Fatalf("got error %s", err)
+	}
+	strAck := string(ack.Data)
+	strExpectedAck := string(expectedAck)
+	if strAck != strExpectedAck {
+		t.Fatalf("received unexpected ack data: got [%s], expected [%s]", strAck, strExpectedAck)
 	}
 }
 
@@ -169,11 +196,11 @@ func TestExactlyOnceProcessing(t *testing.T) {
 	go conn2.Poll()
 
 	msg := &Message{To: conn1Addr, Data: []byte("hello world")}
-	err = conn2.Pub(msg)
+	_, err = conn2.Pub(msg)
 	if err != nil {
 		t.Fatalf("failed to send message: %s", err)
 	}
-	err = conn2.Pub(msg)
+	_, err = conn2.Pub(msg)
 	if err != nil {
 		t.Fatalf("failed to send message: %s", err)
 	}
@@ -216,7 +243,7 @@ func TestMultiplePoll(t *testing.T) {
 	defer conn2.Close()
 
 	msg := &Message{To: conn1Addr, Data: []byte("hello world")}
-	err = conn2.Pub(msg)
+	_, err = conn2.Pub(msg)
 	if err != nil {
 		t.Fatalf("failed to send message: %s", err)
 	}
@@ -229,7 +256,7 @@ func TestMultiplePoll(t *testing.T) {
 	close1()
 
 	msg = &Message{To: conn1Addr, Data: []byte("hello again")}
-	err = conn2.Pub(msg)
+	_, err = conn2.Pub(msg)
 	if err != nil {
 		t.Fatalf("failed to send message: %s", err)
 	}

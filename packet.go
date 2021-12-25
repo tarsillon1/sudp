@@ -1,6 +1,9 @@
 package sudp
 
-import "net"
+import (
+	"encoding/binary"
+	"net"
+)
 
 /* Packet Tags */
 
@@ -20,6 +23,7 @@ var (
 // Message respresents a message.
 type Message struct {
 	To   *net.UDPAddr // Address of the recipient.
+	From *net.UDPAddr // Address of the sender.
 	Seq  uint32       // Unique message sequence number.
 	Data []byte       // The bytes to send to the recipient.
 	Ack  bool         // True if this message should be acknowledged by recipient.
@@ -40,9 +44,7 @@ func marshalMessagePacket(msg *Message) []byte {
 	} else {
 		b[0] = tagMessage
 	}
-	for i := uint32(0); i < 4; i++ {
-		b[i+1] = byte((msg.Seq >> (8 * i)) & 0xff)
-	}
+	binary.LittleEndian.PutUint32(b[1:5], msg.Seq)
 	for i := 0; i < dataLen; i++ {
 		b[i+5] = msg.Data[i]
 	}
@@ -60,35 +62,41 @@ func unmarshalMessagePacket(b []byte, n int) *Message {
 	if b[0] == tagMessageWithAck {
 		msg.Ack = true
 	}
-	for i := uint32(0); i < 4; i++ {
-		msg.Seq |= uint32(b[i+1]) << (8 * i)
-	}
+	msg.Seq = binary.LittleEndian.Uint32(b[1:5])
 	if len(b) > 5 {
 		msg.Data = b[5:n]
 	}
 	return msg
 }
 
-type ackWithAddress struct {
-	addr *net.UDPAddr
-	seq  uint32
+// Ack is the acknowledgement of a message packet.
+type Ack struct {
+	To   *net.UDPAddr
+	From *net.UDPAddr
+	Seq  uint32
+	Data []byte
 }
 
-// marshalAckPacket converts a uint32 representing a message sequence number to bytes.
-func marshalAckPacket(seq uint32) []byte {
-	b := make([]byte, 5)
+// marshalAckPacket marshals a ack into an array of bytes.
+func marshalAckPacket(ack *Ack) []byte {
+	dataLen := len(ack.Data)
+	b := make([]byte, 5+dataLen)
 	b[0] = tagAck
-	for i := uint32(0); i < 4; i++ {
-		b[i+1] = byte((seq >> (8 * i)) & 0xff)
+	binary.LittleEndian.PutUint32(b[1:5], ack.Seq)
+
+	slice := b[5:]
+	for i := 0; i < dataLen; i++ {
+		slice[i] = ack.Data[i]
 	}
 	return b
 }
 
-// unmarshalAckPacket converts an array of bytes representing a message sequence number back into a uint32.
-func unmarshalAckPacket(b []byte) uint32 {
-	r := uint32(0)
-	for i := uint32(0); i < 4; i++ {
-		r |= uint32(b[i+1]) << (8 * i)
+// unmarshalAckPacket converts an array of bytes into an ack.
+func unmarshalAckPacket(b []byte, n int) *Ack {
+	ack := &Ack{}
+	ack.Seq = binary.LittleEndian.Uint32(b[1:5])
+	if len(b) > 5 {
+		ack.Data = b[5:n]
 	}
-	return r
+	return ack
 }
